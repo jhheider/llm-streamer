@@ -3,8 +3,8 @@
 Streaming LLM chat with **one event shape across providers**, plus built-in
 token-cost accounting. Unofficial.
 
-- **One shape to match on.** `stream_chat` yields `StreamEvent`s — `TextDelta`,
-  `Usage`, `StopReason`, `Cost`, `Done`, `Error` — whatever backend produced
+- **One shape to match on.** `stream_chat` yields `StreamEvent`s - `TextDelta`,
+  `Usage`, `StopReason`, `Cost`, `Done`, `Error` - whatever backend produced
   them. Wire faults become `Error`, so you handle exactly one thing.
 - **Two wire formats, many providers.** `anthropic` speaks the Anthropic
   Messages API (`x-api-key`); `openai` speaks chat-completions with bearer auth,
@@ -12,14 +12,14 @@ token-cost accounting. Unofficial.
   OpenAI-compatible endpoint works unchanged, so the same code runs locally.
   `provider_spec` resolves a preset name to a base URL and wire.
 - **Cost accounting built in.** `Pricing` + `usage_cost_cents` turn reported
-  usage into whole cents, conservatively (rounded up, floor of 1) — for products
+  usage into whole cents, conservatively (rounded up, floor of 1) - for products
   that meter AI spend. When a gateway bills in-band, as OpenRouter does, the
   stream hands you a `Cost` event instead; prefer it, since a configured price
   drifts silently every time a provider changes its rate card.
 - **Pure, testable wire parsing.** Each backend's SSE handling is a plain
   function over a buffer, so split-chunk behaviour is unit-tested without a
   socket. The OpenRouter fixtures are captured from the live wire, which is how
-  they cover the things a hand-written fixture misses — `finish_reason` arriving
+  they cover the things a hand-written fixture misses - `finish_reason` arriving
   twice, `delta.reasoning` that must not reach the answer, and
   `completion_tokens` including reasoning tokens.
 
