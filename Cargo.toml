@@ -1,0 +1,34 @@
+[package]
+name = "llm-streamer"
+version = "0.1.0"
+edition = "2024"
+# Verified with `cargo msrv find` at 1.86.0, bounded by the reqwest/url
+# dependency floor. Re-verify with `cargo msrv verify` after any dependency bump.
+rust-version = "1.86.0"
+authors = ["Jacob Heider <jhheider@gmail.com>"]
+repository = "https://github.com/jhheider/llm-streamer"
+homepage = "https://github.com/jhheider/llm-streamer"
+description = "Streaming LLM chat with one event shape across providers, plus token-cost accounting. Two wire formats: Anthropic Messages and OpenAI chat-completions (OpenAI, OpenRouter, DeepSeek, Groq, Together, xAI). Unofficial."
+license = "MIT OR Apache-2.0"
+keywords = ["llm", "streaming", "openrouter", "anthropic", "sse"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+# rustls with NO bundled crypto provider: whoever owns `main` installs a
+# CryptoProvider once. The plain `rustls` feature would pull aws-lc-rs and its
+# cmake C build, which this crate deliberately keeps out of your tree.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+    "json",
+    "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# The example makes real HTTPS calls, and reqwest is built with
+# `rustls-no-provider`, so the example has to install a provider itself.
+# default-features off keeps aws-lc-rs (and its cmake C build) out.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
