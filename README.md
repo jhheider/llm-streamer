@@ -56,6 +56,35 @@ every event, which is the only way to catch a provider changing its shape:
 AI_PROVIDER=openrouter AI_API_KEY=… AI_MODEL=… cargo run --example smoke
 ```
 
+## Thinking and effort
+
+On the Anthropic wire, say what you want and the client sends the form each
+model accepts:
+
+```rust,ignore
+use llm_streamer::anthropic::{Client, Effort};
+
+let client = Client::new(key, "claude-opus-5-5")
+    .with_max_output_tokens(8192) // covers thinking AND the answer
+    .with_adaptive_thinking()     // thinking: {type: "adaptive"}
+    .with_effort(Effort::Low);    // output_config: {effort: "low"}
+```
+
+- `with_adaptive_thinking()` sends `thinking: {type: "adaptive"}` to Opus 4.6,
+  Sonnet 4.6 and later.
+- `with_thinking_budget(n)` is for models that only take a fixed budget
+  (Haiku 4.5, Sonnet/Opus 4.5 and older, DeepSeek's compat endpoint), which get
+  `{type: "enabled", budget_tokens: n}`. Models that return a 400 on
+  `budget_tokens` (Opus 4.7 and later, Sonnet 5, Fable) get adaptive thinking
+  instead, and `n` is added to `max_tokens` as thinking headroom.
+- `with_effort(e)` is clamped to the nearest level the model supports, and left
+  off where the parameter errors (Haiku 4.5, Sonnet 4.5).
+
+Thinking counts toward `max_tokens` even though its text never streams, and
+Opus 5, Opus 5.5, Sonnet 5 and Fable think by default, so size the cap for
+both. `anthropic::thinking_control` and `anthropic::supported_effort` expose the
+per-model table so an application can warn when a setting won't apply.
+
 ## TLS
 
 This crate does not choose a crypto provider. `reqwest` is built with

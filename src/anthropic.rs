@@ -9,6 +9,9 @@ use crate::{StreamEvent, TokenUsage};
 use futures::StreamExt;
 use std::collections::VecDeque;
 
+pub mod thinking;
+pub use thinking::{Effort, ThinkingControl, supported_effort, thinking_control};
+
 /// [`crate::Pricing`] for Claude Haiku 4.5: $1/MTok in, $5/MTok out, cache
 /// write 1.25× / read 0.1×. A convenience default; real deployments usually
 /// read prices from config.
@@ -27,21 +30,26 @@ pub struct Client {
     api_key: String,
     model: String,
     max_output_tokens: u32,
+    adaptive_thinking: bool,
     thinking_budget_tokens: Option<u32>,
+    effort: Option<Effort>,
     http: reqwest::Client,
 }
 
 impl Client {
     /// A client for `model`, talking to Anthropic directly. Defaults:
     /// `base_url = https://api.anthropic.com`, `max_output_tokens = 4096`,
-    /// no extended thinking.
+    /// no `thinking` or `effort` sent (the model's own defaults apply: Opus 5,
+    /// Opus 5.5, Sonnet 5 and Fable think by default, older models don't).
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Client {
             base_url: "https://api.anthropic.com".into(),
             api_key: api_key.into(),
             model: model.into(),
             max_output_tokens: 4096,
+            adaptive_thinking: false,
             thinking_budget_tokens: None,
+            effort: None,
             http: reqwest::Client::new(),
         }
     }
@@ -54,18 +62,58 @@ impl Client {
     }
 
     /// Cap the answer length. This is headroom against runaways, not an editor -
-    /// the system prompt shapes real length.
+    /// the system prompt shapes real length. On a model that thinks
+    /// adaptively (and Opus 5, Opus 5.5, Sonnet 5 and Fable do by default)
+    /// thinking counts toward this cap even though its text never streams, so
+    /// size it for the thinking as well as the answer, or pass a
+    /// [`with_thinking_budget`](Self::with_thinking_budget) as extra headroom.
     pub fn with_max_output_tokens(mut self, n: u32) -> Self {
         self.max_output_tokens = n;
         self
     }
 
-    /// Request extended thinking with `budget` tokens (Anthropic wire shape;
-    /// DeepSeek's compat endpoint honors it). Thinking deltas are parsed and
-    /// dropped, only answer text streams out. Thinking bills at the output
-    /// rate and adds latency, so it's off by default.
+    /// Turn thinking on and let the model decide how much:
+    /// `thinking: {type: "adaptive"}`, on models that support it (Opus 4.6,
+    /// Sonnet 4.6 and later; see [`thinking_control`]). Steer depth with
+    /// [`with_effort`](Self::with_effort). Models that only take a fixed
+    /// budget (Haiku 4.5 and older) get no thinking from this alone; give them
+    /// one with [`with_thinking_budget`](Self::with_thinking_budget).
+    ///
+    /// Thinking deltas are parsed and dropped; only answer text streams out.
+    /// Thinking bills at the output rate and adds latency.
+    pub fn with_adaptive_thinking(mut self) -> Self {
+        self.adaptive_thinking = true;
+        self
+    }
+
+    /// Turn thinking on with `budget` tokens for it. What goes on the wire
+    /// depends on the model ([`thinking_control`]):
+    ///
+    /// - Models that take only a fixed budget (Haiku 4.5, Sonnet/Opus 4.5 and
+    ///   older, non-Claude models such as DeepSeek's compat endpoint) get
+    ///   `thinking: {type: "enabled", budget_tokens: budget}`.
+    /// - Models that take adaptive thinking (Opus 4.6 / Sonnet 4.6 and later)
+    ///   get `thinking: {type: "adaptive"}` instead. `budget_tokens` is a 400
+    ///   on Opus 4.7 and later, Sonnet 5 and Fable, and deprecated on 4.6, so
+    ///   it is never sent to them.
+    ///
+    /// Either way `budget` is added to `max_tokens`, so the answer keeps its
+    /// own [`with_max_output_tokens`](Self::with_max_output_tokens) headroom
+    /// on top of the thinking.
     pub fn with_thinking_budget(mut self, budget: u32) -> Self {
         self.thinking_budget_tokens = Some(budget);
+        self
+    }
+
+    /// Set `output_config: {effort}`, the control for how much the model
+    /// thinks and writes. Sent at the nearest level the model supports, and
+    /// not at all to models that reject the parameter (Haiku 4.5, Sonnet 4.5
+    /// and older, and non-Claude models); see [`supported_effort`]. Effort is
+    /// independent of thinking: on Opus 4.7/4.8 it applies with thinking off,
+    /// and on Opus 5.5, whose thinking can't be turned off (its default
+    /// effort is `medium`), it is the only lever.
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -80,6 +128,49 @@ impl Client {
         &self.model
     }
 
+    /// The request body [`stream_chat`](Self::stream_chat) sends, with the
+    /// thinking and effort settings resolved for this model. Public so the
+    /// shape can be inspected and tested without a network call.
+    pub fn request_body(
+        &self,
+        system: String,
+        messages: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_output_tokens,
+            "system": system,
+            "messages": messages,
+            "stream": true,
+        });
+        let wants_thinking = self.adaptive_thinking || self.thinking_budget_tokens.is_some();
+        if wants_thinking {
+            match thinking_control(&self.model) {
+                ThinkingControl::Budget => {
+                    if let Some(budget) = self.thinking_budget_tokens {
+                        body["thinking"] = serde_json::json!({
+                            "type": "enabled",
+                            "budget_tokens": budget,
+                        });
+                    }
+                }
+                ThinkingControl::AdaptivePreferred | ThinkingControl::AdaptiveOnly => {
+                    body["thinking"] = serde_json::json!({ "type": "adaptive" });
+                }
+            }
+            // A budget is thinking headroom on top of the answer's cap. On the
+            // budget form Anthropic requires budget_tokens < max_tokens; on
+            // adaptive, thinking counts toward max_tokens all the same.
+            if let (Some(_), Some(budget)) = (body.get("thinking"), self.thinking_budget_tokens) {
+                body["max_tokens"] = self.max_output_tokens.saturating_add(budget).into();
+            }
+        }
+        if let Some(effort) = self.effort.and_then(|e| supported_effort(&self.model, e)) {
+            body["output_config"] = serde_json::json!({ "effort": effort.as_str() });
+        }
+        body
+    }
+
     /// One streamed chat completion. `messages` are `{"role", "content"}` JSON
     /// objects, most-recent last; `system` is the system prompt. Yields parsed
     /// [`StreamEvent`]s; wire faults surface as [`StreamEvent::Error`] so
@@ -89,22 +180,7 @@ impl Client {
         system: String,
         messages: Vec<serde_json::Value>,
     ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, String> {
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_output_tokens,
-            "system": system,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(budget) = self.thinking_budget_tokens {
-            // Anthropic semantics: budget_tokens must stay below max_tokens,
-            // so thinking gets its own headroom on top of the answer's.
-            body["max_tokens"] = (self.max_output_tokens + budget).into();
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": budget,
-            });
-        }
+        let body = self.request_body(system, messages);
         let resp = self
             .http
             .post(format!("{}/v1/messages", self.base_url))
@@ -293,6 +369,119 @@ mod tests {
                 }),
             ],
         );
+    }
+
+    fn body(client: Client) -> serde_json::Value {
+        client.request_body(
+            "sys".into(),
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+        )
+    }
+
+    fn client(model: &str) -> Client {
+        // reqwest is built without a crypto provider and panics on client
+        // construction until one is installed; Err means one already is.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        Client::new("k", model).with_max_output_tokens(8192)
+    }
+
+    #[test]
+    fn a_plain_request_sends_no_thinking_or_effort() {
+        let b = body(client("claude-opus-5-5"));
+        assert_eq!(b["max_tokens"], 8192);
+        assert!(b.get("thinking").is_none());
+        assert!(b.get("output_config").is_none());
+        assert_eq!(b["stream"], true);
+    }
+
+    #[test]
+    fn a_budget_never_reaches_a_model_that_rejects_it() {
+        // Regression: `budget_tokens` 400s on every one of these, which
+        // failed every request when a thinking budget was configured.
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-fable-5-1",
+        ] {
+            let b = body(client(model).with_thinking_budget(4096));
+            assert_eq!(
+                b["thinking"],
+                serde_json::json!({"type": "adaptive"}),
+                "{model}"
+            );
+            assert!(!b.to_string().contains("budget_tokens"), "{model}");
+            // The budget still buys headroom: adaptive thinking counts
+            // toward max_tokens.
+            assert_eq!(b["max_tokens"], 8192 + 4096, "{model}");
+        }
+    }
+
+    #[test]
+    fn the_4_6_models_get_adaptive_not_the_deprecated_budget() {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let b = body(client(model).with_thinking_budget(2048));
+            assert_eq!(
+                b["thinking"],
+                serde_json::json!({"type": "adaptive"}),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_models_get_the_budget_form() {
+        for model in ["claude-haiku-4-5", "claude-sonnet-4-5", "deepseek-v4-flash"] {
+            let b = body(client(model).with_thinking_budget(2048));
+            assert_eq!(
+                b["thinking"],
+                serde_json::json!({"type": "enabled", "budget_tokens": 2048}),
+                "{model}"
+            );
+            // budget_tokens must stay below max_tokens; the answer keeps its cap.
+            assert_eq!(b["max_tokens"], 8192 + 2048, "{model}");
+        }
+    }
+
+    #[test]
+    fn adaptive_intent_follows_the_model() {
+        let b = body(client("claude-sonnet-5").with_adaptive_thinking());
+        assert_eq!(b["thinking"], serde_json::json!({"type": "adaptive"}));
+        // No budget given: the cap is untouched and covers the thinking.
+        assert_eq!(b["max_tokens"], 8192);
+
+        // Haiku 4.5 can't think adaptively, and there's no budget to fall
+        // back on, so nothing is sent rather than a shape it rejects.
+        let b = body(client("claude-haiku-4-5").with_adaptive_thinking());
+        assert!(b.get("thinking").is_none());
+        assert_eq!(b["max_tokens"], 8192);
+
+        // Given a budget too, Haiku gets the budget form.
+        let b = body(
+            client("claude-haiku-4-5")
+                .with_adaptive_thinking()
+                .with_thinking_budget(1024),
+        );
+        assert_eq!(b["thinking"]["type"], "enabled");
+        assert_eq!(b["thinking"]["budget_tokens"], 1024);
+    }
+
+    #[test]
+    fn effort_rides_output_config_where_the_model_takes_it() {
+        let b = body(client("claude-opus-5-5").with_effort(Effort::Low));
+        assert_eq!(b["output_config"], serde_json::json!({"effort": "low"}));
+        assert!(b.get("effort").is_none(), "effort is not top-level");
+
+        // Clamped on 4.6, which has no xhigh.
+        let b = body(client("claude-opus-4-6").with_effort(Effort::XHigh));
+        assert_eq!(b["output_config"]["effort"], "high");
+
+        // Errors on Haiku 4.5, so it's left off.
+        let b = body(client("claude-haiku-4-5").with_effort(Effort::Max));
+        assert!(b.get("output_config").is_none());
     }
 
     #[test]
