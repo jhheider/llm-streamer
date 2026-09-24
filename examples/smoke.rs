@@ -37,10 +37,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let client: Client = match spec.wire {
-        Wire::Anthropic => anthropic::Client::new(api_key, &model)
-            .with_base_url(base_url)
-            .with_max_output_tokens(64)
-            .into(),
+        Wire::Anthropic => {
+            // Optional: AI_THINKING=adaptive and AI_EFFORT=low|…|max exercise
+            // the thinking controls against the real API.
+            let mut c = anthropic::Client::new(api_key, &model)
+                .with_base_url(base_url)
+                .with_max_output_tokens(2048);
+            if std::env::var("AI_THINKING").is_ok_and(|v| v == "adaptive") {
+                c = c.with_adaptive_thinking();
+            }
+            if let Ok(e) = std::env::var("AI_EFFORT") {
+                c = c.with_effort(e.parse()?);
+            }
+            println!("body: {}", c.request_body(String::new(), Vec::new()));
+            c.into()
+        }
         Wire::OpenAi => openai::Client::new(base_url, api_key, &model)
             .with_max_output_tokens(64)
             .into(),

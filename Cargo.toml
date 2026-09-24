@@ -1,6 +1,6 @@
 [package]
 name = "llm-streamer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Verified with `cargo msrv find` at 1.86.0, bounded by the reqwest/url
 # dependency floor. Re-verify with `cargo msrv verify` after any dependency bump.
