@@ -383,6 +383,7 @@ mod tests {
             events,
             vec![
                 // The reasoning-only chunk contributes no answer text.
+                StreamEvent::ReasoningDelta(" colors".into()),
                 StreamEvent::TextDelta("Red".into()),
                 StreamEvent::StopReason("stop".into()),
                 StreamEvent::StopReason("stop".into()),
