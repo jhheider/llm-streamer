@@ -65,6 +65,9 @@ pub mod openai;
 pub enum StreamEvent {
     /// A chunk of assistant text.
     TextDelta(String),
+    /// A chunk of reasoning/thinking content (for providers that require
+    /// reasoning round-trip, e.g. Reflection AI / Beam).
+    ReasoningDelta(String),
     /// Usage numbers. A backend may emit these more than once (e.g. input side
     /// then output side); [`merge_usage`] combines them.
     Usage(TokenUsage),

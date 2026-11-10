@@ -202,6 +202,17 @@ pub fn parse_sse_events(buf: &mut String) -> Vec<StreamEvent> {
             {
                 out.push(StreamEvent::TextDelta(text.to_string()));
             }
+            // Reasoning content (Beam requires this in multi-turn)
+            for key in ["reasoning_content", "reasoning"] {
+                if let Some(reasoning) = v
+                    .pointer(&format!("/choices/0/delta/{}", key))
+                    .and_then(|t| t.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(StreamEvent::ReasoningDelta(reasoning.to_string()));
+                    break;
+                }
+            }
             if let Some(reason) = v
                 .pointer("/choices/0/finish_reason")
                 .and_then(|r| r.as_str())
