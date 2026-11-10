@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(ev) = stream.next().await {
         match ev {
             StreamEvent::TextDelta(t) => print!("{t}"),
+            StreamEvent::ReasoningDelta(t) => print!("[reasoning] {t}"),
             StreamEvent::Usage(u) => {
                 usage = llm_streamer::merge_usage(usage, u);
                 println!("\n[usage] {u:?}");

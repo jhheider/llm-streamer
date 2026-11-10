@@ -46,7 +46,7 @@
 //!         StreamEvent::TextDelta(t) => print!("{t}"),
 //!         StreamEvent::Done => break,
 //!         StreamEvent::Error(e) => return Err(e),
-//!         StreamEvent::Usage(_) | StreamEvent::StopReason(_) | StreamEvent::Cost(_) => {}
+//!         StreamEvent::Usage(_) | StreamEvent::StopReason(_) | StreamEvent::Cost(_) | StreamEvent::ReasoningDelta(_) => {}
 //!     }
 //! }
 //! # Ok(()) }
