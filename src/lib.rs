@@ -46,7 +46,7 @@
 //!         StreamEvent::TextDelta(t) => print!("{t}"),
 //!         StreamEvent::Done => break,
 //!         StreamEvent::Error(e) => return Err(e),
-//!         StreamEvent::Usage(_) | StreamEvent::StopReason(_) | StreamEvent::Cost(_) | StreamEvent::ReasoningDelta(_) => {}
+//!         StreamEvent::Usage(_) | StreamEvent::StopReason(_) | StreamEvent::Cost(_) | StreamEvent::ReasoningDelta(_) | StreamEvent::ToolCall { .. } => {}
 //!     }
 //! }
 //! # Ok(()) }
@@ -68,6 +68,13 @@ pub enum StreamEvent {
     /// A chunk of reasoning/thinking content (for providers that require
     /// reasoning round-trip, e.g. Reflection AI / Beam).
     ReasoningDelta(String),
+    /// A tool call requested by the model. Emitted once per call, after the
+    /// streamed argument fragments for that call index have been joined.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     /// Usage numbers. A backend may emit these more than once (e.g. input side
     /// then output side); [`merge_usage`] combines them.
     Usage(TokenUsage),

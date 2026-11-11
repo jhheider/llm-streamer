@@ -33,6 +33,7 @@ pub struct Client {
     referer: Option<String>,
     title: Option<String>,
     http: reqwest::Client,
+    tools: Vec<serde_json::Value>,
 }
 
 impl Client {
@@ -52,6 +53,7 @@ impl Client {
             referer: None,
             title: None,
             http: reqwest::Client::new(),
+            tools: Vec::new(),
         }
     }
 
@@ -80,6 +82,13 @@ impl Client {
         self
     }
 
+    /// Tool definitions to send to the model. Each is a JSON object in
+    /// OpenAI's `tools` shape (`{"type":"function","function":{...}}`).
+    pub fn with_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
+        self.tools = tools;
+        self
+    }
+
     /// The model this client targets.
     pub fn model(&self) -> &str {
         &self.model
@@ -101,12 +110,15 @@ impl Client {
         }
         msgs.extend(messages);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_output_tokens,
             "messages": msgs,
             "stream": true,
         });
+        if !self.tools.is_empty() {
+            body["tools"] = serde_json::json!(self.tools);
+        }
 
         let mut req = self
             .http
@@ -131,18 +143,19 @@ impl Client {
         }
 
         // bytes → (buffered) SSE blocks → parsed events, one at a time.
-        let state = (resp.bytes_stream(), String::new(), VecDeque::new());
+        let state = (resp.bytes_stream(), String::new(), VecDeque::new(), std::collections::HashMap::new());
         Ok(futures::stream::unfold(
             state,
-            |(mut bytes, mut buf, mut queue)| async move {
+            |(mut bytes, mut buf, mut queue, mut tool_acc): (_, _, _, std::collections::HashMap<usize, (String, String, String)>)| async move {
                 loop {
                     if let Some(ev) = queue.pop_front() {
-                        return Some((ev, (bytes, buf, queue)));
+                        return Some((ev, (bytes, buf, queue, tool_acc)));
                     }
                     match bytes.next().await {
                         Some(Ok(chunk)) => {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
-                            queue.extend(parse_sse_events(&mut buf));
+                            let events = parse_sse_events(&mut buf, &mut tool_acc);
+                            queue.extend(events);
                         }
                         Some(Err(e)) => {
                             queue.push_back(StreamEvent::Error(format!("stream broke: {e}")));
@@ -162,7 +175,7 @@ impl Client {
 /// `data: [DONE]` is this format's end-of-stream marker and maps to
 /// [`StreamEvent::Done`] - unlike Anthropic, which sends a typed
 /// `message_stop`.
-pub fn parse_sse_events(buf: &mut String) -> Vec<StreamEvent> {
+pub fn parse_sse_events(buf: &mut String, tool_acc: &mut std::collections::HashMap<usize, (String, String, String)>) -> Vec<StreamEvent> {
     let mut out = Vec::new();
     if buf.contains("\r\n") {
         *buf = buf.replace("\r\n", "\n");
@@ -213,10 +226,36 @@ pub fn parse_sse_events(buf: &mut String) -> Vec<StreamEvent> {
                     break;
                 }
             }
+            // Tool calls
+            if let Some(tc_arr) = v.pointer("/choices/0/delta/tool_calls").and_then(|t| t.as_array()) {
+                for tc in tc_arr {
+                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                    let entry = tool_acc.entry(idx).or_insert_with(|| (String::new(), String::new(), String::new()));
+                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                        if !id.is_empty() { entry.0 = id.to_string(); }
+                    }
+                    if let Some(name) = tc.pointer("/function/name").and_then(|n| n.as_str()) {
+                        if !name.is_empty() { entry.1 = name.to_string(); }
+                    }
+                    if let Some(args) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) {
+                        entry.2.push_str(args);
+                    }
+                }
+            }
             if let Some(reason) = v
                 .pointer("/choices/0/finish_reason")
                 .and_then(|r| r.as_str())
             {
+                if reason == "tool_calls" {
+                    // Emit accumulated tool calls
+                    let mut indices: Vec<usize> = tool_acc.keys().copied().collect();
+                    indices.sort();
+                    for idx in indices {
+                        if let Some((id, name, args)) = tool_acc.remove(&idx) {
+                            out.push(StreamEvent::ToolCall { id, name, arguments: args });
+                        }
+                    }
+                }
                 out.push(StreamEvent::StopReason(normalize_finish_reason(reason)));
             }
             if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
@@ -275,14 +314,14 @@ mod tests {
              data: {\"choices\":[{\"delta\":{\"content\":\"fl",
         );
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![StreamEvent::TextDelta("The party ".into())]
         );
         assert!(buf.starts_with("data:"), "partial event stays buffered");
 
         buf.push_str("ed.\"}}]}\n\ndata: [DONE]\n\n");
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![StreamEvent::TextDelta("fled.".into()), StreamEvent::Done]
         );
         assert!(buf.is_empty());
@@ -298,7 +337,7 @@ mod tests {
              \"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":100}}}\n\n"
             .to_string();
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![
                 StreamEvent::Usage(TokenUsage {
                     // 194 total prompt, of which 100 were cache writes.
@@ -320,7 +359,7 @@ mod tests {
         let mut buf = "data: {\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\
              \"prompt_tokens_details\":{\"cached_tokens\":900}}}\n\n"
             .to_string();
-        let events = parse_sse_events(&mut buf);
+        let events = parse_sse_events(&mut buf, &mut std::collections::HashMap::new());
         let StreamEvent::Usage(u) = &events[0] else {
             panic!("expected usage, got {events:?}");
         };
@@ -336,14 +375,14 @@ mod tests {
         let mut buf =
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n".to_string();
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![StreamEvent::StopReason("max_tokens".into())]
         );
 
         let mut buf =
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_string();
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![StreamEvent::StopReason("stop".into())]
         );
     }
@@ -378,7 +417,7 @@ mod tests {
         )
         .to_string();
 
-        let events = parse_sse_events(&mut buf);
+        let events = parse_sse_events(&mut buf, &mut std::collections::HashMap::new());
         assert_eq!(
             events,
             vec![
@@ -408,7 +447,7 @@ mod tests {
         let mut buf =
             "data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n".to_string();
         assert_eq!(
-            parse_sse_events(&mut buf),
+            parse_sse_events(&mut buf, &mut std::collections::HashMap::new()),
             vec![StreamEvent::Error("rate limited".into())]
         );
     }
@@ -419,6 +458,6 @@ mod tests {
         let mut buf =
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"
                 .to_string();
-        assert!(parse_sse_events(&mut buf).is_empty());
+        assert!(parse_sse_events(&mut buf, &mut std::collections::HashMap::new()).is_empty());
     }
 }
