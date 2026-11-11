@@ -5,8 +5,9 @@
 //! `base_url = https://api.deepseek.com/anthropic`, and Grok exposes a similar
 //! compat surface. Yields the crate's neutral [`StreamEvent`](crate::StreamEvent)s.
 
-use crate::{StreamEvent, TokenUsage};
+use crate::{SecretString, StreamEvent, TokenUsage, mark_sensitive};
 use futures::StreamExt;
+use secrecy::ExposeSecret;
 use std::collections::VecDeque;
 
 pub mod thinking;
@@ -24,10 +25,10 @@ pub const HAIKU_4_5: crate::Pricing = crate::Pricing {
 
 /// A configured Messages API client. Cheap to construct; holds a reusable
 /// `reqwest::Client`. Build with [`Client::new`] and the `with_*` setters.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Client {
     base_url: String,
-    api_key: String,
+    api_key: SecretString,
     model: String,
     max_output_tokens: u32,
     adaptive_thinking: bool,
@@ -41,10 +42,10 @@ impl Client {
     /// `base_url = https://api.anthropic.com`, `max_output_tokens = 4096`,
     /// no `thinking` or `effort` sent (the model's own defaults apply: Opus 5,
     /// Opus 5.5, Sonnet 5 and Fable think by default, older models don't).
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(api_key: SecretString, model: impl Into<String>) -> Self {
         Client {
             base_url: "https://api.anthropic.com".into(),
-            api_key: api_key.into(),
+            api_key,
             model: model.into(),
             max_output_tokens: 4096,
             adaptive_thinking: false,
@@ -171,6 +172,26 @@ impl Client {
         body
     }
 
+    /// The request this client would send. Separate from sending so the
+    /// headers can be checked without a network, and so the key is exposed in
+    /// exactly one place.
+    pub fn build_request(
+        &self,
+        system: String,
+        messages: Vec<serde_json::Value>,
+    ) -> reqwest::Result<reqwest::Request> {
+        let body = self.request_body(system, messages);
+        let mut built = self
+            .http
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .build()?;
+        mark_sensitive(&mut built, "x-api-key");
+        Ok(built)
+    }
+
     /// One streamed chat completion. `messages` are `{"role", "content"}` JSON
     /// objects, most-recent last; `system` is the system prompt. Yields parsed
     /// [`StreamEvent`]s; wire faults surface as [`StreamEvent::Error`] so
@@ -180,14 +201,12 @@ impl Client {
         system: String,
         messages: Vec<serde_json::Value>,
     ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, String> {
-        let body = self.request_body(system, messages);
+        let req = self
+            .build_request(system, messages)
+            .map_err(|e| format!("could not build the request: {e}"))?;
         let resp = self
             .http
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
+            .execute(req)
             .await
             .map_err(|e| format!("upstream request failed: {e}"))?;
         if !resp.status().is_success() {
@@ -382,7 +401,7 @@ mod tests {
         // reqwest is built without a crypto provider and panics on client
         // construction until one is installed; Err means one already is.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        Client::new("k", model).with_max_output_tokens(8192)
+        Client::new(SecretString::from("k"), model).with_max_output_tokens(8192)
     }
 
     #[test]
@@ -488,5 +507,23 @@ mod tests {
     fn haiku_pricing_is_the_published_shape() {
         assert_eq!(HAIKU_4_5.input_cents_per_mtok, 100.0);
         assert_eq!(HAIKU_4_5.output_cents_per_mtok, 500.0);
+    }
+
+    #[test]
+    fn debug_never_prints_the_key() {
+        let c = Client::new(SecretString::from("sk-SECRET-key"), "claude-opus-5-5");
+        let s = format!("{c:?}");
+        assert!(!s.contains("SECRET"), "Debug printed the key: {s}");
+    }
+
+    #[test]
+    fn the_key_reaches_the_auth_header_marked_sensitive() {
+        let c = Client::new(SecretString::from("sk-SECRET-key"), "claude-opus-5-5");
+        let req = c
+            .build_request(String::new(), vec![])
+            .expect("request builds");
+        let auth = req.headers().get("x-api-key").expect("x-api-key header");
+        assert_eq!(auth.to_str().unwrap(), "sk-SECRET-key");
+        assert!(auth.is_sensitive());
     }
 }

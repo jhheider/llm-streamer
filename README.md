@@ -27,10 +27,11 @@ token-cost accounting. Unofficial.
 
 ```rust,no_run
 use futures::StreamExt;
-use llm_streamer::{StreamEvent, anthropic::Client};
+use llm_streamer::{StreamEvent, SecretString, anthropic::Client};
 
 # async fn ex() -> Result<(), String> {
-let client = Client::new(std::env::var("ANTHROPIC_API_KEY").unwrap(), "claude-haiku-4-5");
+let key = SecretString::from(std::env::var("ANTHROPIC_API_KEY").unwrap());
+let client = Client::new(key, "claude-haiku-4-5");
 let stream = client
     .stream_chat(
         "You are terse.".into(),
@@ -63,8 +64,9 @@ model accepts:
 
 ```rust,ignore
 use llm_streamer::anthropic::{Client, Effort};
+use llm_streamer::SecretString;
 
-let client = Client::new(key, "claude-opus-5-5")
+let client = Client::new(SecretString::from(key), "claude-opus-5-5")
     .with_max_output_tokens(8192) // covers thinking AND the answer
     .with_adaptive_thinking()     // thinking: {type: "adaptive"}
     .with_effort(Effort::Low);    // output_config: {effort: "low"}

@@ -14,6 +14,7 @@
 //! is the figure to meter against when a provider sends one.
 
 use futures::StreamExt;
+use llm_streamer::SecretString;
 use llm_streamer::{Client, StreamEvent, Wire, anthropic, openai};
 
 #[tokio::main]
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let provider = std::env::var("AI_PROVIDER").unwrap_or_else(|_| "openrouter".into());
-    let api_key = std::env::var("AI_API_KEY").map_err(|_| "set AI_API_KEY")?;
+    let api_key = SecretString::from(std::env::var("AI_API_KEY").map_err(|_| "set AI_API_KEY")?);
     let model = std::env::var("AI_MODEL").map_err(|_| "set AI_MODEL")?;
 
     let spec = llm_streamer::provider_spec(&provider)

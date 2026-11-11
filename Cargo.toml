@@ -14,6 +14,7 @@ keywords = ["llm", "streaming", "openrouter", "anthropic", "sse"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
+secrecy = "0.10"
 # rustls with NO bundled crypto provider: whoever owns `main` installs a
 # CryptoProvider once. The plain `rustls` feature would pull aws-lc-rs and its
 # cmake C build, which this crate deliberately keeps out of your tree.
