@@ -103,6 +103,7 @@ The crate is not published to crates.io; tags are the release mechanism.
 
 | Tag | `Cargo.toml` version | Note |
 |---|---|---|
+| `v0.4.1` | `0.4.1` | DeepSeek's `prompt_cache_hit_tokens` is read as cached input. |
 | `v0.4.0` | `0.4.0` | Keys are held as `SecretString` (breaking). |
 | `v0.3.1` | `0.2.0` | Mismatched: the version was not bumped before tagging. Code is correct; ignore the number in `Cargo.lock`. |
 | `v0.3.0` | `0.2.0` | Same mismatch, and tagged on a commit that never reached `main`. |
