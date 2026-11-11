@@ -143,10 +143,20 @@ impl Client {
         }
 
         // bytes → (buffered) SSE blocks → parsed events, one at a time.
-        let state = (resp.bytes_stream(), String::new(), VecDeque::new(), std::collections::HashMap::new());
+        let state = (
+            resp.bytes_stream(),
+            String::new(),
+            VecDeque::new(),
+            std::collections::HashMap::new(),
+        );
         Ok(futures::stream::unfold(
             state,
-            |(mut bytes, mut buf, mut queue, mut tool_acc): (_, _, _, std::collections::HashMap<usize, (String, String, String)>)| async move {
+            |(mut bytes, mut buf, mut queue, mut tool_acc): (
+                _,
+                _,
+                _,
+                std::collections::HashMap<usize, (String, String, String)>,
+            )| async move {
                 loop {
                     if let Some(ev) = queue.pop_front() {
                         return Some((ev, (bytes, buf, queue, tool_acc)));
@@ -175,7 +185,10 @@ impl Client {
 /// `data: [DONE]` is this format's end-of-stream marker and maps to
 /// [`StreamEvent::Done`] - unlike Anthropic, which sends a typed
 /// `message_stop`.
-pub fn parse_sse_events(buf: &mut String, tool_acc: &mut std::collections::HashMap<usize, (String, String, String)>) -> Vec<StreamEvent> {
+pub fn parse_sse_events(
+    buf: &mut String,
+    tool_acc: &mut std::collections::HashMap<usize, (String, String, String)>,
+) -> Vec<StreamEvent> {
     let mut out = Vec::new();
     if buf.contains("\r\n") {
         *buf = buf.replace("\r\n", "\n");
@@ -227,15 +240,24 @@ pub fn parse_sse_events(buf: &mut String, tool_acc: &mut std::collections::HashM
                 }
             }
             // Tool calls
-            if let Some(tc_arr) = v.pointer("/choices/0/delta/tool_calls").and_then(|t| t.as_array()) {
+            if let Some(tc_arr) = v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(|t| t.as_array())
+            {
                 for tc in tc_arr {
                     let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                    let entry = tool_acc.entry(idx).or_insert_with(|| (String::new(), String::new(), String::new()));
+                    let entry = tool_acc
+                        .entry(idx)
+                        .or_insert_with(|| (String::new(), String::new(), String::new()));
                     if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                        if !id.is_empty() { entry.0 = id.to_string(); }
+                        if !id.is_empty() {
+                            entry.0 = id.to_string();
+                        }
                     }
                     if let Some(name) = tc.pointer("/function/name").and_then(|n| n.as_str()) {
-                        if !name.is_empty() { entry.1 = name.to_string(); }
+                        if !name.is_empty() {
+                            entry.1 = name.to_string();
+                        }
                     }
                     if let Some(args) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) {
                         entry.2.push_str(args);
@@ -252,7 +274,11 @@ pub fn parse_sse_events(buf: &mut String, tool_acc: &mut std::collections::HashM
                     indices.sort();
                     for idx in indices {
                         if let Some((id, name, args)) = tool_acc.remove(&idx) {
-                            out.push(StreamEvent::ToolCall { id, name, arguments: args });
+                            out.push(StreamEvent::ToolCall {
+                                id,
+                                name,
+                                arguments: args,
+                            });
                         }
                     }
                 }

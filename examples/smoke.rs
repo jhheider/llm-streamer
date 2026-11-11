@@ -88,7 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("\n[error] {e}");
                 std::process::exit(1);
             }
-            StreamEvent::ToolCall { name, arguments, .. } => {
+            StreamEvent::ToolCall {
+                name, arguments, ..
+            } => {
                 println!("\n[tool] {}({})", name, arguments);
             }
         }
