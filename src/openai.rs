@@ -486,4 +486,97 @@ mod tests {
                 .to_string();
         assert!(parse_sse_events(&mut buf, &mut std::collections::HashMap::new()).is_empty());
     }
+
+    #[test]
+    fn one_call_arguments_split_across_chunks() {
+        // A single tool call whose arguments arrive in three pieces. The call
+        // is emitted whole once finish_reason says tool_calls.
+        let mut acc = std::collections::HashMap::new();
+        let mut buf = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n".to_string();
+        assert!(parse_sse_events(&mut buf, &mut acc).is_empty());
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\": \\\"a\"}}]}}]}\n\n");
+        assert!(parse_sse_events(&mut buf, &mut acc).is_empty());
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\".txt\\\"}\"}}]}}]}\n\n");
+        assert!(
+            parse_sse_events(&mut buf, &mut acc).is_empty(),
+            "no call until finish_reason"
+        );
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+        assert_eq!(
+            parse_sse_events(&mut buf, &mut acc),
+            vec![
+                StreamEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: "{\"path\": \"a.txt\"}".into(),
+                },
+                StreamEvent::StopReason("tool_calls".into()),
+            ]
+        );
+        assert!(acc.is_empty(), "accumulator drained");
+    }
+
+    #[test]
+    fn two_parallel_calls_with_interleaved_indices() {
+        // Two calls, their argument chunks interleaved. Each must keep its own
+        // id, name and arguments; index is what tells them apart.
+        let mut acc = std::collections::HashMap::new();
+        let mut buf = String::new();
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"pa\"}},{\"index\":1,\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n");
+        assert!(parse_sse_events(&mut buf, &mut acc).is_empty());
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\": \\\".\\\"}\"}},{\"index\":1,\"function\":{\"arguments\":\"\\\"f.txt\\\"}\"}}]}}]}\n\n");
+        assert!(parse_sse_events(&mut buf, &mut acc).is_empty());
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+        assert_eq!(
+            parse_sse_events(&mut buf, &mut acc),
+            vec![
+                StreamEvent::ToolCall {
+                    id: "a".into(),
+                    name: "list_dir".into(),
+                    arguments: "{\"path\": \".\"}".into(),
+                },
+                StreamEvent::ToolCall {
+                    id: "b".into(),
+                    name: "read_file".into(),
+                    arguments: "{\"path\":\"f.txt\"}".into(),
+                },
+                StreamEvent::StopReason("tool_calls".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_then_a_call_in_one_response() {
+        // Prose first, then a call: both come out, in order, and the text is
+        // not swallowed by the call handling.
+        let mut acc = std::collections::HashMap::new();
+        let mut buf =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Let me look. \"}}]}\n\n".to_string();
+        assert_eq!(
+            parse_sse_events(&mut buf, &mut acc),
+            vec![StreamEvent::TextDelta("Let me look. ".into())]
+        );
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}]}\n\n");
+        assert!(parse_sse_events(&mut buf, &mut acc).is_empty());
+
+        buf.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+        assert_eq!(
+            parse_sse_events(&mut buf, &mut acc),
+            vec![
+                StreamEvent::ToolCall {
+                    id: "c1".into(),
+                    name: "list_dir".into(),
+                    arguments: "{\"path\":\".\"}".into(),
+                },
+                StreamEvent::StopReason("tool_calls".into()),
+                StreamEvent::Done,
+            ]
+        );
+    }
 }
