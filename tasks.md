@@ -45,3 +45,20 @@ Verify the declared rust-version still builds. Slow: it bisects real toolchains.
 ```bash
 cargo msrv verify
 ```
+
+## release-check
+
+Run before tagging a release. Fails unless the current commit is on
+`origin/main` and no tag for the version in `Cargo.toml` exists yet, so a tag
+cannot land on a branch commit or be moved onto an existing one.
+
+```bash
+set -eu
+v="v$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+git fetch --tags --quiet origin
+git branch -r --contains HEAD | grep -qx '  origin/main' || {
+  echo "HEAD is not on origin/main; tag only a merged release commit"; exit 1; }
+git rev-parse -q --verify "refs/tags/$v" >/dev/null && {
+  echo "tag $v already exists; never move a tag, release a new version"; exit 1; }
+echo "ok to tag $v on $(git rev-parse --short HEAD)"
+```
