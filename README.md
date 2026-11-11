@@ -97,6 +97,21 @@ so install one before the first request or the client panics on construction:
 let _ = rustls::crypto::ring::default_provider().install_default();
 ```
 
+## Versions
+
+The crate is not published to crates.io; tags are the release mechanism.
+
+| Tag | `Cargo.toml` version | Note |
+|---|---|---|
+| `v0.4.0` | `0.4.0` | Keys are held as `SecretString` (breaking). |
+| `v0.3.1` | `0.2.0` | Mismatched: the version was not bumped before tagging. Code is correct; ignore the number in `Cargo.lock`. |
+| `v0.3.0` | `0.2.0` | Same mismatch, and tagged on a commit that never reached `main`. |
+
+`v0.3.0` and `v0.3.1` are left as they are on purpose: moving a tag would
+break anything already pinned to it. From `v0.4.0` on, the release procedure in
+[`CLAUDE.md`](CLAUDE.md) is followed, and the `release-check` recipe in
+`tasks.md` enforces it.
+
 ## License
 
 MIT OR Apache-2.0.
