@@ -335,7 +335,19 @@ fn normalize_finish_reason(reason: &str) -> String {
 fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     let g = |p: &str| u.pointer(p).and_then(|n| n.as_u64()).unwrap_or(0);
     let prompt = g("/prompt_tokens");
-    let cached = g("/prompt_tokens_details/cached_tokens");
+    // Two spellings of the same number: OpenAI nests it under
+    // prompt_tokens_details, DeepSeek reports `prompt_cache_hit_tokens` at the
+    // top level and charges a fraction of the miss rate for it. Ignoring the
+    // DeepSeek field counted every cached token as ordinary input, so cost
+    // tracking ran up to ~50x high and the cache rate was invisible.
+    let cached = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|n| n.as_u64())
+        .or_else(|| {
+            u.pointer("/prompt_cache_hit_tokens")
+                .and_then(|n| n.as_u64())
+        })
+        .unwrap_or(0);
     let cache_write = g("/prompt_tokens_details/cache_write_tokens");
     TokenUsage {
         input_tokens: prompt.saturating_sub(cached).saturating_sub(cache_write),
@@ -409,6 +421,38 @@ mod tests {
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.cache_read_tokens, 900);
         assert_eq!(u.input_tokens + u.cache_read_tokens, 1000);
+    }
+
+    #[test]
+    fn deepseek_cache_hits_are_read_from_the_flat_field() {
+        // DeepSeek reports the same number without the nested object:
+        // {"prompt_cache_hit_tokens": 900, "prompt_cache_miss_tokens": 100}.
+        // Ignoring it billed every cached token at the miss rate.
+        let mut buf = "data: {\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\
+             \"prompt_cache_hit_tokens\":900,\"prompt_cache_miss_tokens\":100}}\n\n"
+            .to_string();
+        let mut acc = std::collections::HashMap::new();
+        let events = parse_sse_events(&mut buf, &mut acc);
+        let StreamEvent::Usage(u) = &events[0] else {
+            panic!("expected usage, got {events:?}");
+        };
+        assert_eq!(u.cache_read_tokens, 900);
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.input_tokens + u.cache_read_tokens, 1000);
+    }
+
+    #[test]
+    fn the_nested_field_still_wins_when_both_are_present() {
+        let mut buf = "data: {\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\
+             \"prompt_tokens_details\":{\"cached_tokens\":800},\
+             \"prompt_cache_hit_tokens\":900}}\n\n"
+            .to_string();
+        let mut acc = std::collections::HashMap::new();
+        let events = parse_sse_events(&mut buf, &mut acc);
+        let StreamEvent::Usage(u) = &events[0] else {
+            panic!("expected usage, got {events:?}");
+        };
+        assert_eq!(u.cache_read_tokens, 800);
     }
 
     #[test]
