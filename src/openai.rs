@@ -18,16 +18,17 @@
 //! [`StreamEvent::Cost`] in cents - a number that cannot drift out of date the
 //! way configured [`Pricing`](crate::Pricing) can.
 
-use crate::{StreamEvent, TokenUsage};
+use crate::{SecretString, StreamEvent, TokenUsage, mark_sensitive};
 use futures::StreamExt;
+use secrecy::ExposeSecret;
 use std::collections::VecDeque;
 
 /// A configured chat-completions client. Cheap to construct; holds a reusable
 /// `reqwest::Client`. Build with [`Client::new`] and the `with_*` setters.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Client {
     base_url: String,
-    api_key: String,
+    api_key: SecretString,
     model: String,
     max_output_tokens: u32,
     referer: Option<String>,
@@ -42,12 +43,12 @@ impl Client {
     /// trimmed. Defaults: `max_output_tokens = 4096`.
     pub fn new(
         base_url: impl Into<String>,
-        api_key: impl Into<String>,
+        api_key: SecretString,
         model: impl Into<String>,
     ) -> Self {
         Client {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            api_key: api_key.into(),
+            api_key,
             model: model.into(),
             max_output_tokens: 4096,
             referer: None,
@@ -94,14 +95,14 @@ impl Client {
         &self.model
     }
 
-    /// One streamed chat completion. `system` is prepended as a `system` role
-    /// message, since this wire format has no separate system field. Yields
-    /// parsed [`StreamEvent`]s; wire faults surface as [`StreamEvent::Error`].
-    pub async fn stream_chat(
+    /// The request this client would send. Separate from sending so the
+    /// headers can be checked without a network, and so the key is exposed in
+    /// exactly one place.
+    pub fn build_request(
         &self,
         system: String,
         messages: Vec<serde_json::Value>,
-    ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, String> {
+    ) -> reqwest::Result<reqwest::Request> {
         // Unlike Anthropic, there is no top-level `system` field: the system
         // prompt is just the first message.
         let mut msgs = Vec::with_capacity(messages.len() + 1);
@@ -123,7 +124,7 @@ impl Client {
         let mut req = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&body);
         if let Some(r) = &self.referer {
             req = req.header("HTTP-Referer", r);
@@ -131,9 +132,25 @@ impl Client {
         if let Some(t) = &self.title {
             req = req.header("X-Title", t);
         }
+        let mut built = req.build()?;
+        mark_sensitive(&mut built, "authorization");
+        Ok(built)
+    }
 
-        let resp = req
-            .send()
+    /// One streamed chat completion. `system` is prepended as a `system` role
+    /// message, since this wire format has no separate system field. Yields
+    /// parsed [`StreamEvent`]s; wire faults surface as [`StreamEvent::Error`].
+    pub async fn stream_chat(
+        &self,
+        system: String,
+        messages: Vec<serde_json::Value>,
+    ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, String> {
+        let req = self
+            .build_request(system, messages)
+            .map_err(|e| format!("could not build the request: {e}"))?;
+        let resp = self
+            .http
+            .execute(req)
             .await
             .map_err(|e| format!("upstream request failed: {e}"))?;
         if !resp.status().is_success() {
@@ -578,5 +595,34 @@ mod tests {
                 StreamEvent::Done,
             ]
         );
+    }
+
+    #[test]
+    fn debug_never_prints_the_key() {
+        let c = Client::new(
+            "https://example.invalid/v1",
+            SecretString::from("sk-SECRET-key"),
+            "m",
+        );
+        let s = format!("{c:?}");
+        assert!(!s.contains("SECRET"), "Debug printed the key: {s}");
+    }
+
+    #[test]
+    fn the_key_reaches_the_auth_header_marked_sensitive() {
+        let c = Client::new(
+            "https://example.invalid/v1",
+            SecretString::from("sk-SECRET-key"),
+            "m",
+        );
+        let req = c
+            .build_request(String::new(), vec![])
+            .expect("request builds");
+        let auth = req
+            .headers()
+            .get("authorization")
+            .expect("authorization header");
+        assert_eq!(auth.to_str().unwrap(), "Bearer sk-SECRET-key");
+        assert!(auth.is_sensitive());
     }
 }

@@ -30,10 +30,11 @@
 //!
 //! ```no_run
 //! # async fn ex() -> Result<(), String> {
-//! use llm_streamer::{StreamEvent, anthropic::Client};
+//! use llm_streamer::{StreamEvent, SecretString, anthropic::Client};
 //! use futures::StreamExt;
 //!
-//! let client = Client::new(std::env::var("ANTHROPIC_API_KEY").unwrap(), "claude-haiku-4-5");
+//! let key = SecretString::from(std::env::var("ANTHROPIC_API_KEY").unwrap());
+//! let client = Client::new(key, "claude-haiku-4-5");
 //! let stream = client
 //!     .stream_chat(
 //!         "You are terse.".into(),
@@ -239,9 +240,21 @@ pub fn provider_spec(name: &str) -> Option<&'static ProviderSpec> {
 
 // ─── One client over either wire ────────────────────────────────────────────
 
+/// Re-exported so callers need no direct `secrecy` dependency to hold a key
+/// the safe way.
+pub use secrecy::SecretString;
+
+/// Marks an auth header so reqwest and anything that logs headers treat it as
+/// sensitive.
+pub(crate) fn mark_sensitive(req: &mut reqwest::Request, header: &str) {
+    if let Some(value) = req.headers_mut().get_mut(header) {
+        value.set_sensitive(true);
+    }
+}
+
 /// A backend-agnostic client, so callers pick a provider at runtime without
 /// branching at every call site.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Client {
     Anthropic(anthropic::Client),
     OpenAi(openai::Client),
@@ -374,5 +387,17 @@ mod tests {
     fn merge_takes_per_field_maxima() {
         let merged = merge_usage(u(120, 0, 0, 40), u(0, 77, 0, 0));
         assert_eq!(merged, u(120, 77, 0, 40));
+    }
+
+    #[test]
+    fn the_enum_debug_does_not_print_the_key() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let c = Client::OpenAi(openai::Client::new(
+            "https://example.invalid/v1",
+            crate::SecretString::from("sk-SECRET-key"),
+            "m",
+        ));
+        let s = format!("{c:?}");
+        assert!(!s.contains("SECRET"), "Debug printed the key: {s}");
     }
 }
