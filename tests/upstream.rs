@@ -278,3 +278,100 @@ async fn a_slow_start_within_the_limit_succeeds() {
     }
     assert_eq!(text, "ok");
 }
+
+#[tokio::test]
+async fn a_stream_ends_after_its_first_error() {
+    // A good first chunk, then silence past the read timeout. The stream reports
+    // the timeout once, and then it must end. It must not keep reporting.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_request(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            let event = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+            let _ = stream.write_all(format!("{:x}\r\n{event}\r\n", event.len()).as_bytes());
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    });
+    let mut stream = Box::pin(
+        client(&base, Duration::from_millis(300))
+            .stream_chat(String::new(), vec![])
+            .await
+            .expect("the answer starts"),
+    );
+    // Read to the end, but no further than 50 events and 10 seconds: a stream
+    // that keeps going must fail the test, not hang it.
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+            if events.len() > 50 {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("the stream did not end within 10 s");
+    let errors = events
+        .iter()
+        .filter(|e| matches!(e, StreamEvent::Error(_)))
+        .count();
+    assert_eq!(errors, 1, "the stream reported {errors} errors, not one");
+}
+
+#[tokio::test]
+async fn an_anthropic_stream_ends_after_its_first_error() {
+    // The same fault on the Messages wire: one text delta, then silence past the
+    // read timeout. The error is reported once, and then the stream ends.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_request(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+            let _ = stream.write_all(format!("{:x}\r\n{event}\r\n", event.len()).as_bytes());
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    });
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_millis(300))
+        .build()
+        .expect("client");
+    let client = llm_streamer::anthropic::Client::new(SecretString::from("sk-test"), "m")
+        .with_base_url(base)
+        .with_http_client(http);
+    let mut stream = Box::pin(
+        client
+            .stream_chat(String::new(), vec![])
+            .await
+            .expect("the answer starts"),
+    );
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+            if events.len() > 50 {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("the stream did not end within 10 s");
+    let errors = events
+        .iter()
+        .filter(|e| matches!(e, StreamEvent::Error(_)))
+        .count();
+    assert_eq!(errors, 1, "the stream reported {errors} errors, not one");
+}

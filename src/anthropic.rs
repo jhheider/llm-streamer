@@ -217,7 +217,7 @@ impl Client {
         }
 
         // bytes → (buffered) SSE blocks → parsed events, one at a time.
-        let state = (resp.bytes_stream(), String::new(), VecDeque::new());
+        let state = (Some(resp.bytes_stream()), String::new(), VecDeque::new());
         Ok(futures::stream::unfold(
             state,
             |(mut bytes, mut buf, mut queue)| async move {
@@ -225,13 +225,19 @@ impl Client {
                     if let Some(ev) = queue.pop_front() {
                         return Some((ev, (bytes, buf, queue)));
                     }
-                    match bytes.next().await {
+                    // A body that failed is not read again: it would fail the same way.
+                    let next = match bytes.as_mut() {
+                        Some(body) => body.next().await,
+                        None => return None,
+                    };
+                    match next {
                         Some(Ok(chunk)) => {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
                             queue.extend(parse_sse_events(&mut buf));
                         }
                         Some(Err(e)) => {
                             queue.push_back(crate::stream_broke(&e));
+                            bytes = None;
                         }
                         None => return None,
                     }
