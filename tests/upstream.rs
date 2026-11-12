@@ -190,3 +190,91 @@ async fn a_stream_that_goes_silent_mid_answer_names_the_timeout() {
     let error = error.expect("the silence must surface as an error event");
     assert!(error.starts_with("stream timed out"), "event: {error}");
 }
+
+/// Writes one HTTP/1.1 chunked response, one chunk per entry, pausing `gap`
+/// between chunks. An empty `chunks` list still ends the response cleanly.
+fn stream_chunks(stream: &mut std::net::TcpStream, chunks: &[String], gap: Duration) {
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+    );
+    for chunk in chunks {
+        std::thread::sleep(gap);
+        let _ = stream.write_all(format!("{:x}\r\n{chunk}\r\n", chunk.len()).as_bytes());
+        let _ = stream.flush();
+    }
+    let _ = stream.write_all(b"0\r\n\r\n");
+}
+
+fn text_event(s: &str) -> String {
+    format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{s}\"}}}}]}}\n\n")
+}
+
+#[tokio::test]
+async fn a_steady_stream_longer_than_the_idle_limit_completes() {
+    // Ten chunks, 300 ms apart: 3 s in all. The read timeout is 1 s, so the
+    // answer is longer than the limit, but it is never silent for that long.
+    // The limit measures silence, not the whole answer, so nothing is cut off.
+    let chunks: Vec<String> = (0..10)
+        .map(|i| text_event(&format!("w{i} ")))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_request(&mut stream);
+            stream_chunks(&mut stream, &chunks, Duration::from_millis(300));
+        }
+    });
+    let mut stream = Box::pin(
+        client(&base, Duration::from_secs(1))
+            .stream_chat(String::new(), vec![])
+            .await
+            .expect("the answer starts"),
+    );
+    let mut text = String::new();
+    let mut errors = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            StreamEvent::TextDelta(t) => text.push_str(&t),
+            StreamEvent::Error(e) => errors.push(e),
+            _ => {}
+        }
+    }
+    assert!(errors.is_empty(), "a moving stream was cut off: {errors:?}");
+    assert_eq!(text.split_whitespace().count(), 10, "text: {text:?}");
+}
+
+#[tokio::test]
+async fn a_slow_start_within_the_limit_succeeds() {
+    // Headers arrive after 1 s, and the read timeout is 2 s: the first read
+    // waits inside the limit, so the answer is not a timeout.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_request(&mut stream);
+            std::thread::sleep(Duration::from_secs(1));
+            stream_chunks(
+                &mut stream,
+                &[text_event("ok"), "data: [DONE]\n\n".into()],
+                Duration::ZERO,
+            );
+        }
+    });
+    let mut stream = Box::pin(
+        client(&base, Duration::from_secs(2))
+            .stream_chat(String::new(), vec![])
+            .await
+            .expect("a slow start inside the limit must not fail"),
+    );
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            StreamEvent::TextDelta(t) => text.push_str(&t),
+            StreamEvent::Error(e) => panic!("a slow start was reported as an error: {e}"),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "ok");
+}
