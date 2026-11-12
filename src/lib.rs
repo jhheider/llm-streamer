@@ -29,7 +29,7 @@
 //! ```
 //!
 //! ```no_run
-//! # async fn ex() -> Result<(), String> {
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! use llm_streamer::{StreamEvent, SecretString, anthropic::Client};
 //! use futures::StreamExt;
 //!
@@ -46,7 +46,7 @@
 //!     match ev {
 //!         StreamEvent::TextDelta(t) => print!("{t}"),
 //!         StreamEvent::Done => break,
-//!         StreamEvent::Error(e) => return Err(e),
+//!         StreamEvent::Error(e) => return Err(e.into()),
 //!         StreamEvent::Usage(_) | StreamEvent::StopReason(_) | StreamEvent::Cost(_) | StreamEvent::ReasoningDelta(_) | StreamEvent::ToolCall { .. } => {}
 //!     }
 //! }
@@ -101,6 +101,70 @@ pub enum StreamEvent {
 }
 
 // ─── Usage & cost (provider-neutral) ────────────────────────────────────────
+
+/// Why a streamed request failed before its first event. Typed, so a caller can
+/// tell a timeout from a refused connection, and a 429 (with any `Retry-After`)
+/// from a 400. `Display` keeps the wording callers already match on, and adds
+/// "timed out" where a timeout happened.
+#[derive(Debug)]
+pub enum UpstreamError {
+    /// No answer within the client's connect or read timeout.
+    Timeout(String),
+    /// The connection could not be made at all.
+    Connect(String),
+    /// The server answered with a non-success status.
+    Status {
+        status: reqwest::StatusCode,
+        /// The `Retry-After` header, when it is given in seconds. The HTTP-date
+        /// form is not parsed and reads as `None`.
+        retry_after: Option<std::time::Duration>,
+        body: String,
+    },
+    /// Anything else: a request that could not be built, or another transport failure.
+    Other(String),
+}
+
+impl std::fmt::Display for UpstreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamError::Timeout(detail) => write!(f, "upstream timed out: {detail}"),
+            UpstreamError::Connect(detail) => write!(f, "upstream connection failed: {detail}"),
+            UpstreamError::Status { status, body, .. } => write!(f, "upstream {status}: {body}"),
+            UpstreamError::Other(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for UpstreamError {}
+
+/// Classifies a failure to send the request.
+pub(crate) fn send_failed(e: reqwest::Error) -> UpstreamError {
+    if e.is_timeout() {
+        UpstreamError::Timeout(e.to_string())
+    } else if e.is_connect() {
+        UpstreamError::Connect(e.to_string())
+    } else {
+        UpstreamError::Other(format!("upstream request failed: {e}"))
+    }
+}
+
+/// Reads `Retry-After` as a number of seconds.
+pub(crate) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+}
+
+/// The text of a mid-stream failure: a timeout is named as one.
+pub(crate) fn stream_broke(e: &reqwest::Error) -> StreamEvent {
+    if e.is_timeout() {
+        StreamEvent::Error(format!("stream timed out: {e}"))
+    } else {
+        StreamEvent::Error(format!("stream broke: {e}"))
+    }
+}
 
 /// Token counts from one model response.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,7 +348,7 @@ impl Client {
         &self,
         system: String,
         messages: Vec<serde_json::Value>,
-    ) -> Result<futures::stream::BoxStream<'static, StreamEvent>, String> {
+    ) -> Result<futures::stream::BoxStream<'static, StreamEvent>, UpstreamError> {
         use futures::StreamExt;
         match self {
             Client::Anthropic(c) => Ok(c.stream_chat(system, messages).await?.boxed()),
