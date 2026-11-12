@@ -29,7 +29,7 @@ token-cost accounting. Unofficial.
 use futures::StreamExt;
 use llm_streamer::{StreamEvent, SecretString, anthropic::Client};
 
-# async fn ex() -> Result<(), String> {
+# async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 let key = SecretString::from(std::env::var("ANTHROPIC_API_KEY").unwrap());
 let client = Client::new(key, "claude-haiku-4-5");
 let stream = client
@@ -43,7 +43,7 @@ while let Some(ev) = stream.next().await {
     match ev {
         StreamEvent::TextDelta(t) => print!("{t}"),
         StreamEvent::Done => break,
-        StreamEvent::Error(e) => return Err(e),
+        StreamEvent::Error(e) => return Err(e.into()),
         _ => {}
     }
 }
@@ -103,6 +103,7 @@ The crate is not published to crates.io; tags are the release mechanism.
 
 | Tag | `Cargo.toml` version | Note |
 |---|---|---|
+| `v0.5.0` | `0.5.0` | Breaking: `stream_chat` returns a typed `UpstreamError` instead of a `String`. It separates timeouts, connection failures, statuses (with `Retry-After` in seconds) and other errors. Its text is unchanged except that timeouts say "timed out". |
 | `v0.4.1` | `0.4.1` | DeepSeek's `prompt_cache_hit_tokens` is read as cached input. |
 | `v0.4.2` | `0.4.2` | `stream_options.include_usage` is sent, so providers that report usage only on request (Reflection) are not counted as free. |
 | `v0.4.0` | `0.4.0` | Keys are held as `SecretString` (breaking). |

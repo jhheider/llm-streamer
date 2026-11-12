@@ -5,7 +5,7 @@
 //! `base_url = https://api.deepseek.com/anthropic`, and Grok exposes a similar
 //! compat surface. Yields the crate's neutral [`StreamEvent`](crate::StreamEvent)s.
 
-use crate::{SecretString, StreamEvent, TokenUsage, mark_sensitive};
+use crate::{SecretString, StreamEvent, TokenUsage, UpstreamError, mark_sensitive};
 use futures::StreamExt;
 use secrecy::ExposeSecret;
 use std::collections::VecDeque;
@@ -200,19 +200,20 @@ impl Client {
         &self,
         system: String,
         messages: Vec<serde_json::Value>,
-    ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, String> {
+    ) -> Result<impl futures::Stream<Item = StreamEvent> + Send + 'static, UpstreamError> {
         let req = self
             .build_request(system, messages)
-            .map_err(|e| format!("could not build the request: {e}"))?;
-        let resp = self
-            .http
-            .execute(req)
-            .await
-            .map_err(|e| format!("upstream request failed: {e}"))?;
+            .map_err(|e| UpstreamError::Other(format!("could not build the request: {e}")))?;
+        let resp = self.http.execute(req).await.map_err(crate::send_failed)?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("upstream {status}: {text}"));
+            let retry_after = crate::retry_after(resp.headers());
+            let body = resp.text().await.unwrap_or_default();
+            return Err(UpstreamError::Status {
+                status,
+                retry_after,
+                body,
+            });
         }
 
         // bytes → (buffered) SSE blocks → parsed events, one at a time.
@@ -230,7 +231,7 @@ impl Client {
                             queue.extend(parse_sse_events(&mut buf));
                         }
                         Some(Err(e)) => {
-                            queue.push_back(StreamEvent::Error(format!("stream broke: {e}")));
+                            queue.push_back(crate::stream_broke(&e));
                         }
                         None => return None,
                     }
