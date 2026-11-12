@@ -116,6 +116,10 @@ impl Client {
             "max_tokens": self.max_output_tokens,
             "messages": msgs,
             "stream": true,
+            // Ask for the figures. OpenAI-compatible providers only report
+            // usage on a final, contentless chunk when this is set: without
+            // it Reflection returns no usage at all and every call looks free.
+            "stream_options": { "include_usage": true },
         });
         if !self.tools.is_empty() {
             body["tools"] = serde_json::json!(self.tools);
@@ -421,6 +425,33 @@ mod tests {
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.cache_read_tokens, 900);
         assert_eq!(u.input_tokens + u.cache_read_tokens, 1000);
+    }
+
+    #[test]
+    fn the_request_asks_for_usage_and_a_contentless_chunk_still_counts() {
+        // Reflection reports no usage at all unless stream_options asks, and
+        // then only on a final chunk whose choices array is empty.
+        let c = Client::new("https://example.invalid/v1", SecretString::from("***"), "m");
+        let req = c
+            .build_request(String::new(), vec![])
+            .expect("request builds");
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body().and_then(|b| b.as_bytes()).expect("json body"))
+                .expect("body is json");
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["stream"], true);
+
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {"prompt_tokens": 48, "completion_tokens": 36,
+                      "prompt_tokens_details": {"cached_tokens": 0}}
+        });
+        let usage = parse_usage(&chunk["usage"]);
+        assert_eq!(usage.input_tokens, 48);
+        assert_eq!(usage.output_tokens, 36);
+        // An empty choices array must not be an error: every pointer read
+        // from it simply misses.
+        assert!(chunk.pointer("/choices/0/delta/content").is_none());
     }
 
     #[test]
