@@ -103,6 +103,7 @@ The crate is not published to crates.io; tags are the release mechanism.
 
 | Tag | `Cargo.toml` version | Note |
 |---|---|---|
+| `v0.5.1` | `0.5.1` | A stream ends after its first error. A body that timed out was read again and reported the same timeout without end; it is now reported once. |
 | `v0.5.0` | `0.5.0` | Breaking: `stream_chat` returns a typed `UpstreamError` instead of a `String`. It separates timeouts, connection failures, statuses (with `Retry-After` in seconds) and other errors. Its text is unchanged except that timeouts say "timed out". |
 | `v0.4.1` | `0.4.1` | DeepSeek's `prompt_cache_hit_tokens` is read as cached input. |
 | `v0.4.2` | `0.4.2` | `stream_options.include_usage` is sent, so providers that report usage only on request (Reflection) are not counted as free. |
