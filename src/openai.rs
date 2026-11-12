@@ -435,10 +435,9 @@ mod tests {
         let req = c
             .build_request(String::new(), vec![])
             .expect("request builds");
-        let body: serde_json::Value = serde_json::from_slice(
-            req.body().and_then(|b| b.as_bytes()).expect("json body"),
-        )
-        .expect("body is json");
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body().and_then(|b| b.as_bytes()).expect("json body"))
+                .expect("body is json");
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["stream"], true);
 
